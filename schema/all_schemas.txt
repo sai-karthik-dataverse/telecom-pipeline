@@ -1,1 +1,111 @@
+subscribers
+----------
+subscriber_id           string      not null
+msisdn                  string      nullable
+account_number          string      nullable
+first_name              string      nullable
+last_name               string      nullable
+email                   string      nullable
+dob                     string      nullable    yyyy-MM-dd
+state                   string      nullable    2-char US code
+plan_code               string      nullable
+plan_start_date         string      nullable    yyyy-MM-dd HH:mm:ss
+device_type             string      nullable
+imei                    string      nullable    empty for non-device types
+network_type            string      nullable
+is_active               integer     nullable    1/0
+activation_date         string      nullable    yyyy-MM-dd HH:mm:ss
+deactivation_date       string      nullable    null if still active
+churn_reason            string      nullable    null if active
+payment_method          string      nullable
+monthly_spend           string      nullable    string in source, cast in silver
+credit_score            string      nullable    string in source, cast in silver
+num_lines               integer     nullable
+ported_from             string      nullable    empty if not ported
+created_at              string      nullable    yyyy-MM-dd HH:mm:ss
+updated_at              string      nullable    yyyy-MM-dd HH:mm:ss
 
+
+call_detail_records
+-------------------
+cdr_id                  string      not null
+subscriber_id           string      nullable    FK -> subscribers
+call_type               string      nullable    voice_mo/voice_mt/sms_mo/sms_mt/data_session/voicemail/roaming_voice/roaming_data
+call_start_ts           string      nullable    yyyy-MM-dd HH:mm:ss
+call_end_ts             string      nullable    yyyy-MM-dd HH:mm:ss
+duration_seconds        string      nullable    string in source, empty for sms
+data_mb                 string      nullable    only populated for data sessions
+originating_number      string      nullable
+terminating_number      string      nullable    empty for data sessions
+tower_id                string      nullable    ~1% null (wifi/off-network)
+network_type            string      nullable
+roaming_country         string      nullable    empty if domestic
+call_cost               string      nullable    empty for unrated records
+rating_status           string      nullable    rated/unrated/error/partial
+is_anomaly              integer     nullable    source-level flag
+event_date              string      nullable    yyyy-MM-dd, can lag call_start_ts for late arrivals
+
+
+billing_events (JSON, one object per invoice)
+---------------------------------------------
+invoice_id              string      not null
+subscriber_id           string      nullable    FK -> subscribers
+account_number          string      nullable
+billing_period_start    string      nullable    yyyy-MM-dd
+billing_period_end      string      nullable    yyyy-MM-dd
+invoice_date            string      nullable    yyyy-MM-dd
+due_date                string      nullable    yyyy-MM-dd
+total_amount            double      nullable
+status                  string      nullable    paid/unpaid/overdue/disputed/waived/partial_pay
+payment_method          string      nullable    null ~5%
+payment_date            string      nullable    null if unpaid
+charges                 array       not null    see below
+autopay_enrolled        boolean     nullable
+paper_bill              boolean     nullable
+created_at              string      nullable    yyyy-MM-dd HH:mm:ss
+dispute_reason          string      nullable    schema drift - only on ~5% of records
+legacy_invoice_ref      string      nullable    schema drift - only on ~3% of records
+
+charges[] items:
+charge_type             string      nullable
+amount                  double      nullable    negative = credit
+tax_amount              double      nullable    null ~10%
+description             string      nullable
+
+
+support_tickets (NDJSON, one object per line)
+---------------------------------------------
+ticket_id               string      not null
+subscriber_id           string      nullable    FK -> subscribers
+category                string      nullable    billing/technical/coverage/device/account/porting/roaming/other
+subcategory             string      nullable    null ~10%
+channel                 string      nullable    phone/chat/email/store/social/app
+priority                string      nullable    P1/P2/P3/P4
+status                  string      nullable    open/in_progress/resolved/closed/escalated
+assigned_agent          string      nullable    null ~8%
+created_at              string      nullable    yyyy-MM-dd HH:mm:ss
+updated_at              string      nullable    yyyy-MM-dd HH:mm:ss
+resolved_at             string      nullable    null if open
+resolution_code         string      nullable    null if open
+csat_score              integer     nullable    1-5, null if no response
+notes                   string      nullable
+sentiment               string      nullable    schema drift - only on tickets after 2023-06-01
+
+
+network_events
+--------------
+event_id                string      not null
+tower_id                string      nullable
+event_type              string      nullable    cell_outage/tower_degraded/handoff_failure/congestion/maintenance_window/capacity_alert/interference_detected/fiber_cut/power_failure/restored
+severity                string      nullable    P1/P2/P3/P4/INFO
+start_ts                string      nullable    yyyy-MM-dd HH:mm:ss
+end_ts                  string      nullable    empty for ongoing events
+affected_subscribers_est string     nullable    integer, ~5% null
+region                  string      nullable
+state                   string      nullable
+latitude                double      nullable
+longitude               double      nullable
+vendor                  string      nullable    can be empty
+resolved                integer     nullable    0/1
+root_cause              string      nullable    empty if unresolved
+created_at              string      nullable    yyyy-MM-dd HH:mm:ss
