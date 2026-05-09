@@ -1,0 +1,134 @@
+source-to-target mapping
+telecom-databricks-pipeline
+===========================
+
+
+subscribers.csv -> bronze -> silver -> gold
+-------------------------------------------
+
+raw to bronze (no transforms, audit cols added):
+  all source columns pass through as-is
+  + _ingested_at, _source_file, _load_date, _batch_id, _epoch_id
+
+bronze to silver/subscribers (SCD1 merge on subscriber_id):
+  first_name              initcap + trim
+  last_name               initcap + trim
+  email                   lower + trim
+  state                   upper + trim
+  plan_code               upper + trim
+  device_type             lower + trim
+  network_type            upper + trim
+  monthly_spend      ->   monthly_spend_num       cast double, null on fail
+  credit_score       ->   credit_score_num        cast int, null on fail
+  plan_start_date    ->   plan_start_date_ts      to_timestamp
+  activation_date    ->   activation_date_ts      to_timestamp
+  deactivation_date  ->   deactivation_date_ts    to_timestamp
+  dob                ->   dob_date                to_date yyyy-MM-dd
+  updated_at         ->   updated_at_ts           to_timestamp
+  derived: credit_band        from credit_score_num (poor/fair/good/very_good/exceptional)
+  derived: tenure_months      months_between(deactivation or now, activation)
+  derived: email_valid        regex check 0/1
+  derived: _dq_flags          array of issue codes
+  derived: _has_dq_issues     size(_dq_flags) > 0
+
+plan_code changes -> silver/subscriber_plan_history (SCD2, append):
+  subscriber_id, old_plan_code, new_plan_code, effective_start, effective_end, recorded_at
+
+
+call_detail_records.csv -> bronze -> silver -> gold
+----------------------------------------------------
+
+bronze to silver/cdr (upsert on cdr_id, partition by event_date_parsed):
+  call_start_ts      ->   call_start_ts           to_timestamp
+  call_end_ts        ->   call_end_ts             to_timestamp
+  event_date         ->   event_date_parsed       to_date
+  duration_seconds        cast long
+  data_mb                 cast double
+  call_cost               cast double
+  call_type               lower + trim
+  network_type            upper + trim
+  rating_status           lower + trim
+  derived: _late_arriving         call_start date != event_date_parsed
+  derived: _computed_duration_s   unix_ts(end) - unix_ts(start)
+  derived: _duration_mismatch     abs diff > 60s
+  derived: _data_mb_zscore        per call_type z-score
+  derived: _anomaly_flags         rule-based array
+  derived: _final_anomaly         is_anomaly OR derived flags
+  derived: _fraud_risk_flag       NONE/LOW/MEDIUM/HIGH from 30d rolling anomaly count
+
+unrated CDRs also written to silver/unrated_cdr_reprocess
+
+
+billing_events.json -> bronze -> silver
+----------------------------------------
+
+bronze to silver/billing (upsert on invoice_id, partition by billing_period_start):
+  billing_period_start    to_date
+  billing_period_end      to_date
+  invoice_date            to_date
+  due_date                to_date
+  payment_date            to_date
+  total_amount            cast double
+  status                  lower + trim
+  dispute_reason          pass through, null if field absent (schema drift)
+  legacy_invoice_ref      pass through, null if field absent (schema drift)
+  derived: days_overdue   datediff(today, due_date) where status in (overdue, unpaid)
+  charges array           dropped from invoice table
+
+charges[] -> silver/billing_charges (append, partition by billing_period_start):
+  invoice_id, subscriber_id, billing_period_start from parent
+  charge.charge_type      charge_type
+  charge.amount           amount      cast double
+  charge.tax_amount       tax_amount  cast double
+  charge.description      description
+  derived: is_credit      amount < 0
+
+
+support_tickets.ndjson -> bronze -> silver
+------------------------------------------
+
+bronze to silver/support_tickets (upsert on ticket_id):
+  created_at              to_timestamp
+  updated_at              to_timestamp
+  resolved_at             to_timestamp
+  sentiment               pass through, null if field absent (schema drift, post Jun 2023)
+
+
+network_events.csv -> bronze -> silver
+----------------------------------------
+
+bronze to silver/network_events (upsert on event_id, partition by event_date + state):
+  start_ts                to_timestamp
+  end_ts                  to_timestamp
+  event_type              lower + trim
+  severity                upper + trim
+  state                   upper + trim
+  vendor                  initcap + trim
+  root_cause              lower + trim
+  affected_subscribers_est cast long
+  latitude, longitude     cast double
+  resolved                cast int
+  derived: duration_minutes   (end_ts - start_ts) / 60
+  derived: event_date         to_date(start_ts)
+
+
+silver/* -> gold/subscriber_churn_metrics
+------------------------------------------
+
+joins: subscribers + cdr (monthly) + billing (monthly) + support_tickets (monthly) + network_events (by state)
+partition: snapshot_month + state, overwrite with replaceWhere
+
+key derived columns:
+  arpu                total_billed / num_lines
+  plan_category       mapped from plan_code (prepaid/postpaid/family/business)
+  plan_downgraded     1 if plan tier dropped in the month (from plan_history)
+  network_quality_score   outage count * resolution_rate by state
+  churn_score         rule-based 0.1/0.5/0.8/1.0 (placeholder for ML model)
+
+
+silver/network_events -> gold/network_quality_metrics
+------------------------------------------------------
+
+partition: report_month, overwrite with replaceWhere
+aggregates: outage counts by state/region, MTTR, resolution rates, P1/P2 breakdown
+worst_towers_monthly: top 10 worst towers per state by outage count
